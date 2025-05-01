@@ -443,6 +443,105 @@ def create_weekly_efficiency_analysis(df, output_dir='employee_efficiency_charts
     # Return the metrics dataframes
     return weekly_metrics, employee_averages
 
+def create_department_weekly_charts(df, output_dir='employee_efficiency_charts'):
+    """Creates weekly efficiency charts for the entire department."""
+    print("\nGenerating Department Weekly Analysis...")
+    
+    # Create department charts directory
+    dept_dir = os.path.join(output_dir, 'Department_Analysis')
+    if not os.path.exists(dept_dir):
+        os.makedirs(dept_dir)
+        print(f"Created department directory: {dept_dir}")
+    
+    # Calculate efficiency at Job-Operation level first
+    df_job_op = df.groupby(['JobNum', 'OprSeq', 'StartDate']).agg({
+        'LaborHrs': 'sum',
+        'ProdStandard': 'first',
+        'ProdQty': 'first'
+    }).reset_index()
+    
+    # Calculate efficiency ratios
+    df_job_op['HrsPerUnit'] = np.where(df_job_op['ProdQty'] > 0,
+                                      df_job_op['LaborHrs'] / df_job_op['ProdQty'],
+                                      np.nan)
+    df_job_op['EfficiencyRatio'] = np.where(df_job_op['ProdStandard'] > 0,
+                                           df_job_op['HrsPerUnit'] / df_job_op['ProdStandard'],
+                                           np.nan)
+    
+    # Add week start date
+    df_job_op['WeekStart'] = pd.to_datetime(df_job_op['StartDate']).dt.to_period('W').dt.start_time
+    
+    # Calculate weekly metrics with confidence intervals
+    weekly_metrics = df_job_op.groupby('WeekStart').agg({
+        'JobNum': 'nunique',
+        'OprSeq': 'nunique',
+        'EfficiencyRatio': ['mean', 'std', 'count', 'sem'],  # Added standard error of mean
+        'ProdStandard': 'mean'
+    }).reset_index()
+    
+    # Flatten column names and calculate confidence intervals
+    weekly_metrics.columns = ['WeekStart', 'UniqueJobs', 'UniqueOperations', 
+                            'AvgEfficiency', 'StdDevEfficiency', 'SampleSize',
+                            'StdError', 'AvgProdStandard']
+    
+    # Calculate 95% confidence intervals
+    confidence_level = 0.95
+    z_score = 1.96  # z-score for 95% confidence level
+    weekly_metrics['CI_Lower'] = weekly_metrics['AvgEfficiency'] - (z_score * weekly_metrics['StdError'])
+    weekly_metrics['CI_Upper'] = weekly_metrics['AvgEfficiency'] + (z_score * weekly_metrics['StdError'])
+    
+    # Create bar chart with confidence intervals
+    fig = go.Figure()
+    
+    # Add efficiency ratio bars with confidence intervals
+    fig.add_trace(go.Bar(
+        x=weekly_metrics['WeekStart'],
+        y=weekly_metrics['AvgEfficiency'],
+        name='Weekly Efficiency',
+        error_y=dict(
+            type='data',
+            array=(weekly_metrics['CI_Upper'] - weekly_metrics['AvgEfficiency']),
+            arrayminus=(weekly_metrics['AvgEfficiency'] - weekly_metrics['CI_Lower']),
+            visible=True,
+            color='rgba(0,0,0,0.3)',  # Semi-transparent black
+            thickness=1.5
+        )
+    ))
+    
+    # Add target line
+    fig.add_hline(
+        y=1.0,
+        line_dash="dash",
+        line_color="red",
+        annotation_text="Target Efficiency (1.0)"
+    )
+    
+    # Update layout
+    fig.update_layout(
+        title='Department Weekly Efficiency Ratio',
+        xaxis_title="Week Starting",
+        yaxis_title="Average Efficiency Ratio (Lower is Better)",
+        showlegend=True,
+        hovermode='x unified',
+        hoverlabel=dict(namelength=-1),
+    )
+    
+    # Add hover template
+    fig.update_traces(
+        hovertemplate="Week: %{x}<br>" +
+                     "Efficiency: %{y:.2f}<br>" +
+                     "Jobs: " + weekly_metrics['UniqueJobs'].astype(str) + "<br>" +
+                     "Operations: " + weekly_metrics['UniqueOperations'].astype(str) + "<br>" +
+                     "Sample Size: " + weekly_metrics['SampleSize'].astype(str)
+    )
+    
+    # Save the plot
+    output_file = os.path.join(dept_dir, "department_weekly_efficiency.html")
+    fig.write_html(output_file)
+    print(f"Department weekly analysis saved to: {output_file}")
+    
+    return weekly_metrics
+
 # --- Main Execution ---
 if __name__ == "__main__":
     base_data = load_base_data(DATA_FILE_BASE)
@@ -488,5 +587,9 @@ if __name__ == "__main__":
         print(employee_averages.sort_values('EfficiencyRatio')[
             ['Name', 'JobNum', 'OprSeq', 'EfficiencyRatio', 'ProdStandard', 'TotalEntries']
         ].to_string(index=False, float_format=lambda x: '{:.2f}'.format(x)))
+
+        # Generate department-wide analysis
+        print("\nGenerating Department-wide Analysis...")
+        dept_weekly_metrics = create_department_weekly_charts(base_data)
 
     print("\nScript finished.")
