@@ -232,8 +232,23 @@ def create_employee_efficiency_charts(df, target_name, base_output_dir='employee
                                    'ProdStandard': ':.2f', 'SumTotalLaborHrs':':.2f', 'ProdQty':':.0f'}
                       )
         # Add horizontal line at y=1 (Standard efficiency)
-        fig_1.add_hline(y=1.0, line_dash="dash", line_color="red", # Use red for standard line
-                        annotation_text="Standard", annotation_position="bottom right")
+        fig_1.add_trace(
+            go.Scatter(
+                x=[None],
+                y=[None],
+                mode='lines',
+                name='Standard (Target)',
+                line=dict(color='red', dash='dash'),
+                showlegend=True
+            )
+        )
+        fig_1.add_hline(
+            y=1.0, 
+            line_dash="dash", 
+            line_color="red",
+            annotation=None  # Remove the annotation but keep the line
+        )
+
         fig_1.update_layout(legend_title_text='Metric')
         fig_1.update_xaxes(tickangle=45, type='category')
 
@@ -287,8 +302,23 @@ def create_employee_efficiency_charts(df, target_name, base_output_dir='employee
                                        'AvgProdStandard': ':.3f', 'JobOpInstanceCount': True}
                           )
             # Add horizontal line at y=1
-            fig_2.add_hline(y=1.0, line_dash="dash", line_color="red",
-                            annotation_text="Standard", annotation_position="bottom right")
+            fig_2.add_trace(
+                go.Scatter(
+                    x=[None],
+                    y=[None],
+                    mode='lines',
+                    name='Standard (Target)',
+                    line=dict(color='red', dash='dash'),
+                    showlegend=True
+                )
+            )
+            fig_2.add_hline(
+                y=1.0, 
+                line_dash="dash", 
+                line_color="red",
+                annotation=None  # Remove the annotation but keep the line
+            )
+
             fig_2.update_layout(legend_title_text='Metric')
             fig_2.update_xaxes(tickangle=45, type='category')
 
@@ -508,12 +538,24 @@ def create_department_weekly_charts(df, output_dir='employee_efficiency_charts')
         )
     ))
     
-    # Add target line
+    # Add reference line to legend first (invisible trace)
+    fig.add_trace(
+        go.Scatter(
+            x=[None],
+            y=[None],
+            mode='lines',
+            name='Standard (Target)',
+            line=dict(color='red', dash='dash'),
+            showlegend=True
+        )
+    )
+    
+    # Add the actual line without annotation
     fig.add_hline(
         y=1.0,
         line_dash="dash",
         line_color="red",
-        annotation_text="Target Efficiency (1.0)"
+        annotation=None  # Remove the annotation
     )
     
     # Update layout
