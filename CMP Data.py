@@ -163,9 +163,7 @@ def load_base_data(filepath):
                 print(f"Found {unmapped_count} rows with unmapped part numbers")
                 print(f"Unmapped parts have been written to: {log_file}")
                 
-                # Filter to keep only mapped rows
-                df = df[df['NormalizedPartNum'].notna()]
-                print(f"\nKept {len(df)} rows after filtering")
+                print(f"\nKept all {len(df)} rows for analysis")
         except Exception as e:
             print(f"Error applying part number mapping: {e}")
             sys.exit(1)
@@ -336,7 +334,7 @@ def create_employee_efficiency_charts(df, target_name, base_output_dir='employee
     print(f"\nChart generation complete for {target_name}.")
 
 def create_weekly_efficiency_analysis(df, output_dir='employee_efficiency_charts'):
-    """Analyzes weekly efficiency metrics per employee at Job-Operation level"""
+    """Analyzes weekly efficiency metrics per employee including estimated unmapped work"""
     print("\nGenerating Weekly Efficiency Analysis...")
     
     # Count total raw entries per employee before any aggregation
@@ -344,136 +342,280 @@ def create_weekly_efficiency_analysis(df, output_dir='employee_efficiency_charts
     print("\nTotal raw entries per employee:")
     print(raw_entry_counts.to_string())
     
-    # Add date range validation and logging at the start
+    # Add date range validation and logging
     date_range = pd.date_range(df['StartDate'].min(), df['StartDate'].max())
     total_weeks = len(pd.period_range(df['StartDate'].min(), df['StartDate'].max(), freq='W'))
     print(f"\nAnalyzing data from {df['StartDate'].min().strftime('%Y-%m-%d')} to {df['StartDate'].max().strftime('%Y-%m-%d')}")
     print(f"Total weeks in date range: {total_weeks}")
     
-    # Calculate active weeks per employee for context
-    employee_weeks = df.groupby('Name').agg({
-        'StartDate': lambda x: len(pd.period_range(x.min(), x.max(), freq='W'))
-    }).rename(columns={'StartDate': 'WeeksActive'})
-    print("\nWeeks active per employee:")
-    print(employee_weeks.to_string())
+    # Split data into mapped and unmapped
+    mapped_df = df[df['NormalizedPartNum'].notna()].copy()
+    unmapped_df = df[df['NormalizedPartNum'].isna()].copy()
     
-    # First, calculate efficiency at Job-Operation level
-    df_job_op = df.groupby(['Name', 'JobNum', 'OprSeq']).agg({
+    # Process unmapped entries
+    if not unmapped_df.empty:
+        print("\nProcessing unmapped entries...")
+        # Group by JobNum, OprSeq to get counts of people who worked on each
+        unmapped_counts = unmapped_df.groupby(['JobNum', 'OprSeq'])['Name'].nunique().reset_index(name='WorkerCount')
+        
+        # Merge worker counts back to unmapped data
+        unmapped_df = unmapped_df.merge(unmapped_counts, on=['JobNum', 'OprSeq'])
+        
+        # Calculate estimated quantity per person
+        unmapped_df['EstimatedQty'] = unmapped_df['ProdQty'] / unmapped_df['WorkerCount']
+        
+        # Calculate hours per estimated unit
+        unmapped_df['EstHrsPerUnit'] = unmapped_df['LaborHrs'] / unmapped_df['EstimatedQty']
+        unmapped_df['EstEfficiencyRatio'] = unmapped_df['EstHrsPerUnit'] / unmapped_df['ProdStandard']
+        
+        print(f"Processed {len(unmapped_df)} unmapped entries")
+        
+        # After processing unmapped entries, add diagnostic output
+        print("\nUnmapped Entries Analysis:")
+        print(f"Total unique unmapped Job/Operation combinations: {len(unmapped_counts)}")
+        print("\nWorker distribution for unmapped entries:")
+        print(unmapped_counts['WorkerCount'].value_counts().sort_index().to_string())
+        
+        print("\nSummary of unmapped efficiency calculations:")
+        unmapped_summary = unmapped_df.groupby(['JobNum', 'OprSeq']).agg({
+            'WorkerCount': 'first',
+            'ProdQty': 'first',
+            'EstimatedQty': 'mean',
+            'LaborHrs': 'sum',
+            'EstHrsPerUnit': 'mean',
+            'EstEfficiencyRatio': 'mean'
+        }).reset_index()
+        
+        print(unmapped_summary.describe().to_string())
+        
+        print("\nTop 10 most frequent unmapped Job/Operations:")
+        print(unmapped_df.groupby(['JobNum', 'OprSeq']).size().sort_values(ascending=False).head(10).to_string())
+    
+    # Calculate weekly metrics for mapped items - include all operations before filtering
+    all_job_op = df.groupby(['Name', 'JobNum', 'OprSeq', 'StartDate']).agg({
+        'LaborHrs': 'sum',
+        'ProdStandard': 'first',
+        'ProdQty': 'first'
+    }).reset_index()
+    
+    # Add week start date for all operations
+    all_job_op['WeekStart'] = pd.to_datetime(all_job_op['StartDate']).dt.to_period('W').dt.start_time
+    
+    # Calculate total operations per week (mapped + unmapped)
+    total_weekly_ops = all_job_op.groupby(['Name', 'WeekStart']).agg({
+        'JobNum': 'nunique',            # Count unique jobs
+        'OprSeq': 'count'              # Change 'nunique' to 'count' to count all operations
+    }).reset_index()
+
+    # Add diagnostic output to verify operation counting
+    print("\nExample weekly operation counts:")
+    sample_week = total_weekly_ops.groupby('Name').agg({
+        'JobNum': ['mean', 'max'],
+        'OprSeq': ['mean', 'max']
+    }).round(2)
+    sample_week.columns = ['Avg Jobs/Week', 'Max Jobs/Week', 'Avg Ops/Week', 'Max Ops/Week']
+    print(sample_week.to_string())
+    
+    # Process mapped entries for efficiency calculations
+    mapped_job_op = mapped_df.groupby(['Name', 'JobNum', 'OprSeq']).agg({
         'LaborHrs': 'sum',
         'ProdStandard': 'first',
         'ProdQty': 'first',
         'StartDate': 'first'
     }).reset_index()
     
-    # Calculate efficiency ratio at Job-Operation level
-    df_job_op['HrsPerUnit'] = np.where(df_job_op['ProdQty'] > 0,
-                                      df_job_op['LaborHrs'] / df_job_op['ProdQty'],
-                                      np.nan)
-    df_job_op['EfficiencyRatio'] = np.where(df_job_op['ProdStandard'] > 0,
-                                           df_job_op['HrsPerUnit'] / df_job_op['ProdStandard'],
-                                           np.nan)
+    mapped_job_op['HrsPerUnit'] = np.where(mapped_job_op['ProdQty'] > 0,
+                                          mapped_job_op['LaborHrs'] / mapped_job_op['ProdQty'],
+                                          np.nan)
+    mapped_job_op['EfficiencyRatio'] = np.where(mapped_job_op['ProdStandard'] > 0,
+                                               mapped_job_op['HrsPerUnit'] / mapped_job_op['ProdStandard'],
+                                               np.nan)
     
-    # Add week start date
-    df_job_op['WeekStart'] = pd.to_datetime(df_job_op['StartDate']).dt.to_period('W').dt.start_time
+    # Add week start dates
+    mapped_job_op['WeekStart'] = pd.to_datetime(mapped_job_op['StartDate']).dt.to_period('W').dt.start_time
+    unmapped_df['WeekStart'] = pd.to_datetime(unmapped_df['StartDate']).dt.to_period('W').dt.start_time
     
-    # First group by Name, WeekStart, and JobNum to count unique operations per job
-    job_ops_per_week = df_job_op.groupby(['Name', 'WeekStart', 'JobNum'])['OprSeq'].nunique().reset_index()
-    
-    # Then calculate weekly metrics
-    weekly_metrics = job_ops_per_week.groupby(['Name', 'WeekStart']).agg({
-        'JobNum': 'nunique',                # Unique jobs per week
-        'OprSeq': 'sum'                     # Sum of unique operations across all jobs that week
+    # Calculate weekly metrics for mapped items
+    mapped_metrics = mapped_job_op.groupby(['Name', 'WeekStart']).agg({
+        'JobNum': 'nunique',
+        'OprSeq': 'nunique',
+        'EfficiencyRatio': 'mean',
+        'ProdStandard': 'mean'
     }).reset_index()
     
-    # Add efficiency metrics
-    efficiency_metrics = df_job_op.groupby(['Name', 'WeekStart']).agg({
-        'EfficiencyRatio': 'mean',          # Average efficiency ratio
-        'ProdStandard': 'mean'             # Average production standard
+    # Calculate weekly metrics for unmapped items
+    if not unmapped_df.empty:
+        unmapped_metrics = unmapped_df.groupby(['Name', 'WeekStart']).agg({
+            'JobNum': 'nunique',
+            'OprSeq': 'nunique',
+            'EstEfficiencyRatio': 'mean',
+            'ProdStandard': 'mean'
+        }).reset_index()
+        
+        # Combine metrics (weighted average based on operation counts)
+        weekly_metrics = pd.merge(mapped_metrics, unmapped_metrics, 
+                                on=['Name', 'WeekStart'], 
+                                how='outer',
+                                suffixes=('_mapped', '_unmapped'))
+        
+        # Calculate combined efficiency ratio
+        weekly_metrics['TotalOps'] = weekly_metrics['OprSeq_mapped'].fillna(0) + weekly_metrics['OprSeq_unmapped'].fillna(0)
+        weekly_metrics['CombinedEfficiencyRatio'] = (
+            (weekly_metrics['EfficiencyRatio'] * weekly_metrics['OprSeq_mapped'].fillna(0) +
+             weekly_metrics['EstEfficiencyRatio'] * weekly_metrics['OprSeq_unmapped'].fillna(0)) / 
+            weekly_metrics['TotalOps']
+        )
+    else:
+        weekly_metrics = mapped_metrics.copy()
+        weekly_metrics['CombinedEfficiencyRatio'] = weekly_metrics['EfficiencyRatio']
+    
+    # Before employee summary calculation, merge total operations metrics
+    employee_averages = pd.merge(weekly_metrics, 
+                                total_weekly_ops,  
+                                on=['Name', 'WeekStart'],
+                                how='outer',
+                                suffixes=('', '_total'))
+
+    # Update employee_summary calculation using available columns
+    employee_summary = employee_averages.groupby('Name').agg({
+        'JobNum': 'mean',            
+        'OprSeq': 'mean',           
+        'CombinedEfficiencyRatio': 'mean'
     }).reset_index()
-    
-    # Merge the metrics
-    weekly_metrics = weekly_metrics.merge(efficiency_metrics, on=['Name', 'WeekStart'])
-    
-    # Calculate employee averages with proper weekly division
-    employee_averages = weekly_metrics.merge(employee_weeks, on='Name').groupby('Name').agg({
-        'JobNum': lambda x: x.sum() / x.count(),    # Average jobs per active week
-        'OprSeq': lambda x: x.sum() / x.count(),    # Average operations per active week
-        'EfficiencyRatio': 'mean',                  # Average efficiency ratio
-        'ProdStandard': 'mean',                     # Average production standard
-        'WeeksActive': 'first'                      # Keep weeks active for reference
-    }).reset_index()
-    
+
     # Add raw entry counts
-    employee_averages = employee_averages.merge(raw_entry_counts, on='Name')
-    
-    # Update scatter plot to use TotalEntries for marker size
-    fig = px.scatter(
-        employee_averages,
-        x='OprSeq',
-        y='EfficiencyRatio',
-        color='ProdStandard',
-        size='TotalEntries',                # Changed to use total raw entries
-        size_max=50,
-        color_continuous_scale=['lightblue', 'darkblue'],
-        text='Name',
-        title='Employee Efficiency Analysis (Job-Operation Level)',
-        labels={
-            'OprSeq': 'Average Operations per Week',
-            'EfficiencyRatio': 'Average Efficiency Ratio (Lower is Better)',
-            'ProdStandard': 'Avg Production Standard (Hours)',
-            'TotalEntries': 'Total Number of Entries'  # Added label for hover
-        },
-        hover_data={
-            'Name': True,
-            'JobNum': ':.1f',
-            'OprSeq': ':.1f',
-            'EfficiencyRatio': ':.2f',
-            'ProdStandard': ':.2f',
-            'TotalEntries': True            # Show raw count in hover
-        }
+    employee_summary = employee_summary.merge(raw_entry_counts, on='Name')
+
+    # Calculate average ProdStandard from mapped data separately
+    avg_prod_standard = mapped_df.groupby('Name')['ProdStandard'].mean().reset_index()
+    employee_summary = employee_summary.merge(avg_prod_standard, on='Name', how='left')
+
+    # Update scatter plot configuration with verified columns
+    fig = go.Figure()
+
+    fig.add_trace(go.Scatter(
+        x=employee_summary['OprSeq'],
+        y=employee_summary['CombinedEfficiencyRatio'],
+        mode='markers+text',
+        name='Employees',
+        text=employee_summary['Name'],
+        textposition='top center',
+        marker=dict(
+            size=employee_summary['TotalEntries'],
+            sizemode='area',
+            sizeref=2.*max(employee_summary['TotalEntries'])/(50.**2),
+            sizemin=10,
+            color=employee_summary['ProdStandard'],
+            colorscale='Viridis',  # Changed from 'Blues' to 'Viridis' for better contrast
+            showscale=True,
+            colorbar=dict(
+                title='Avg Production Standard',
+                titleside='right'
+            )
+        ),
+        hovertemplate="<br>".join([
+            "Name: %{text}",
+            "Avg Ops/Week: %{x:.1f}",
+            "Efficiency Ratio: %{y:.2f}",
+            "Total Entries: %{marker.size}",
+            "Avg Prod Standard: %{marker.color:.3f}"
+        ])
+    ))
+
+    # Add horizontal average line
+    avg_efficiency = employee_summary['CombinedEfficiencyRatio'].mean()
+    fig.add_trace(go.Scatter(
+        x=[min(employee_summary['OprSeq']), max(employee_summary['OprSeq'])],  # Changed from JobNum
+        y=[avg_efficiency, avg_efficiency],
+        mode='lines',
+        name='Group Avg Efficiency',
+        line=dict(color='blue', dash='dot'),
+        hovertemplate=f"Group Average Efficiency: {avg_efficiency:.2f}"
+    ))
+
+    # Add vertical average line
+    avg_ops = employee_summary['OprSeq'].mean()  # Changed from JobNum
+    fig.add_trace(go.Scatter(
+        x=[avg_ops, avg_ops],  # Changed from avg_jobs
+        y=[min(employee_summary['CombinedEfficiencyRatio']), max(employee_summary['CombinedEfficiencyRatio'])],
+        mode='lines',
+        name='Group Avg Operations',  # Updated name
+        line=dict(color='blue', dash='dot'),
+        hovertemplate=f"Group Average Operations: {avg_ops:.1f}"  # Updated text
+    ))
+
+    # Add standard efficiency line (1.0)
+    fig.add_trace(go.Scatter(
+        x=[min(employee_summary['OprSeq']), max(employee_summary['OprSeq'])],  # Changed from JobNum
+        y=[1.0, 1.0],
+        mode='lines',
+        name='Standard (Target)',
+        line=dict(color='red', dash='dash'),
+        hovertemplate="Standard Efficiency: 1.00"
+    ))
+
+    # Update annotations
+    fig.add_annotation(
+        x=max(employee_summary['OprSeq']),  # Changed from JobNum
+        y=avg_efficiency,
+        text=f"Group Avg: {avg_efficiency:.2f}",
+        showarrow=True,
+        arrowhead=2,
+        arrowsize=1,
+        arrowwidth=1,
+        arrowcolor="blue",
+        ax=40,
+        ay=0,
+        font=dict(color="blue"),
+        xanchor='left',
+        xshift=10
     )
-    
-    # Add reference lines
-    fig.add_hline(
-        y=1.0, 
-        line_dash="dash", 
-        line_color="red",
-        annotation_text="Target Efficiency (1.0)"
+
+    fig.add_annotation(
+        x=avg_ops,  # Changed from avg_jobs
+        y=max(employee_summary['CombinedEfficiencyRatio']),
+        text=f"Group Avg: {avg_ops:.1f}",  # Changed to avg_ops
+        showarrow=True,
+        arrowhead=2,
+        arrowsize=1,
+        arrowwidth=1,
+        arrowcolor="blue",
+        ax=0,
+        ay=-40,
+        font=dict(color="blue")
     )
-    
-    group_avg_ops = employee_averages['OprSeq'].mean()
-    group_avg_ratio = employee_averages['EfficiencyRatio'].mean()
-    
-    fig.add_hline(
-        y=group_avg_ratio,
-        line_dash="dash", 
-        line_color="gray",
-        annotation_text=f"Group Avg ({group_avg_ratio:.2f})"
-    )
-    
-    fig.add_vline(
-        x=group_avg_ops, 
-        line_dash="dash", 
-        line_color="gray",
-        annotation_text=f"Group Avg Ops ({group_avg_ops:.1f})"
-    )
-    
-    # Update layout
-    fig.update_traces(textposition='top center')
+
+    # Update the layout section with adjusted vertical spacing
     fig.update_layout(
+        title={
+            'text': 'Employee Efficiency Analysis<br><br><span style="font-size:12px;color:gray">Marker size indicates total number of labor entries</span>',
+            'y': 0.97,  # Moved up slightly
+            'x': 0.5,
+            'xanchor': 'center',
+            'yanchor': 'top'
+        },
+        xaxis_title='Average Operations per Week',
+        yaxis_title='Combined Efficiency Ratio',
         showlegend=True,
-        legend_title_text='Avg Production Standard',
-        xaxis_title="Average Unique Operations per Week",
-        yaxis_title="Average Efficiency Ratio (Lower is Better)"
+        hovermode='closest',
+        hoverlabel=dict(namelength=-1),
+        legend=dict(
+            y=1.15,    # Increased vertical position
+            x=0.5,
+            xanchor='center',
+            yanchor='top',
+            orientation='h',
+            bgcolor='rgba(255,255,255,0.8)'
+        ),
+        margin=dict(t=120)  # Increased top margin to accommodate spacing
     )
-    
+
     # Save the plot
-    output_file = os.path.join(output_dir, "weekly_efficiency_analysis.html")
+    output_file = os.path.join(output_dir, "employee_efficiency_scatter.html")
     fig.write_html(output_file)
-    print(f"Weekly efficiency analysis saved to: {output_file}")
+    print(f"\nEmployee efficiency scatter plot saved to: {output_file}")
     
-    # Return the metrics dataframes
-    return weekly_metrics, employee_averages
+    return weekly_metrics, employee_summary
 
 def create_department_weekly_charts(df, output_dir='employee_efficiency_charts'):
     """Creates weekly efficiency charts for the entire department."""
@@ -628,8 +770,8 @@ if __name__ == "__main__":
         weekly_metrics, employee_averages = create_weekly_efficiency_analysis(base_data)
         
         print("\nEmployee Weekly Averages:")
-        print(employee_averages.sort_values('EfficiencyRatio')[
-            ['Name', 'JobNum', 'OprSeq', 'EfficiencyRatio', 'ProdStandard', 'TotalEntries']
+        print(employee_averages.sort_values('CombinedEfficiencyRatio')[
+            ['Name', 'JobNum', 'OprSeq', 'CombinedEfficiencyRatio', 'TotalEntries']
         ].to_string(index=False, float_format=lambda x: '{:.2f}'.format(x)))
 
         # Generate department-wide analysis
