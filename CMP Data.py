@@ -78,7 +78,7 @@ def load_base_data(filepath):
 
         # Expected columns from the new base query
         expected_cols = ['Name', 'JobNum', 'OprSeq', 'BasePartNum', 'PartDescription',
-                         'ProdStandard', 'ProdQty', 'LaborHrs', 'StartDate']
+                         'ProdStandard', 'ProdQty', 'LaborHrs', 'StartDate', 'OpDesc']
         # Include FullPartNum if selected in SQL
         if 'FullPartNum' in df.columns: expected_cols.append('FullPartNum')
         # Include LaborDate if selected in SQL
@@ -139,8 +139,10 @@ def load_base_data(filepath):
                 mapped_count = df['NormalizedPartNum'].notna().sum()
                 unmapped_count = total_rows - mapped_count
                 
-                # Get unmapped parts with their descriptions
-                unmapped_df = df[df['NormalizedPartNum'].isna()][['BasePartNum', 'PartDescription']].drop_duplicates()
+                # Get unmapped parts with their descriptions and Job/Op info
+                unmapped_df = df[df['NormalizedPartNum'].isna()][
+                    ['BasePartNum', 'PartDescription', 'JobNum', 'OprSeq', 'OpDesc', 'ProdQty']
+                ].drop_duplicates()
                 
                 # Write unmapped parts to log file
                 log_file = 'unmapped_parts.log'
@@ -151,11 +153,11 @@ def load_base_data(filepath):
                     f.write(f"\nMapped Parts: {mapped_count}")
                     f.write(f"\nUnmapped Parts: {unmapped_count}\n")
                     f.write("\nUnique Unmapped Part Numbers:\n")
-                    f.write("=" * 80 + "\n")
-                    f.write("Part Number\tDescription\n")
-                    f.write("-" * 80 + "\n")
+                    f.write("=" * 140 + "\n")  # Increased width for new column
+                    f.write("Part Number\tDescription\tJob Number\tOperation\tOp Description\tQuantity\n")
+                    f.write("-" * 140 + "\n")  # Increased width for new column
                     for _, row in unmapped_df.iterrows():
-                        f.write(f"{row['BasePartNum']}\t{row['PartDescription']}\n")
+                        f.write(f"{row['BasePartNum']}\t{row['PartDescription']}\t{row['JobNum']}\t{row['OprSeq']}\t{row['OpDesc']}\t{int(row['ProdQty'])}\n")
                 
                 print(f"\nFound {mapped_count} rows with valid part number mappings")
                 print(f"Found {unmapped_count} rows with unmapped part numbers")
