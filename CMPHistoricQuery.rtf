@@ -1,0 +1,74 @@
+{\rtf1\ansi\ansicpg1252\cocoartf2821
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fswiss\fcharset0 Helvetica;}
+{\colortbl;\red255\green255\blue255;}
+{\*\expandedcolortbl;;}
+\margl1440\margr1440\vieww11520\viewh8400\viewkind0
+\pard\tx720\tx1440\tx2160\tx2880\tx3600\tx4320\tx5040\tx5760\tx6480\tx7200\tx7920\tx8640\pardirnatural\partightenfactor0
+
+\f0\fs24 \cf0 -- Query 2: Historical Analysis with BasePartNum, filtering OprSeq with < 10 instances\
+\
+-- Set target base part number and date range (adjust as needed)\
+DECLARE targetBasePartNum STRING DEFAULT 'PRO115SL'; -- <<< REPLACE THIS\
+DECLARE startDateHist DATE DEFAULT DATE '2024-01-01'; -- Previous full year start\
+DECLARE endDateHist DATE DEFAULT DATE '2024-12-31'; -- Previous full year end\
+\
+WITH HistoricalLaborInstances AS (\
+    -- Get total labor for each employee on each Job/Op instance for the target BASE part/period\
+    SELECT\
+        SPLIT(t5.PartNum, '-')[OFFSET(0)] AS BasePartNum, -- Normalize PartNum\
+        t2.OprSeq,\
+        SUM(t3.LaborHrs) AS EmployeeJobOpTotalHrs\
+    FROM\
+        `warehouse-363320.Epicor10Replication.JobOpDtl` AS t1\
+    JOIN\
+        `warehouse-363320.Epicor10Replication.JobOper` AS t2\
+        ON t1.Company = t2.Company AND t1.JobNum = t2.JobNum AND t1.OprSeq = t2.OprSeq\
+    JOIN\
+        `warehouse-363320.Epicor10Replication.LaborDtl` AS t3\
+        ON t1.Company = t3.Company AND t1.JobNum = t3.JobNum AND t1.OprSeq = t3.OprSeq\
+    LEFT JOIN\
+        `warehouse-363320.Epicor10Replication.JobHead` AS t5\
+        ON t1.Company = t5.Company AND t1.JobNum = t5.JobNum\
+    WHERE\
+        t5.PartNum IS NOT NULL\
+        AND STRPOS(t5.PartNum, '-') > 0 -- Ensure hyphen exists for split\
+        AND SPLIT(t5.PartNum, '-')[OFFSET(0)] = targetBasePartNum -- Filter on Base PartNum\
+        AND t2.StartDate BETWEEN startDateHist AND endDateHist -- Filter for the previous year\
+        AND LEFT(t2.OpCode, 5) = 'M-CMP' -- Keep OpCode filter consistent\
+        AND t3.LaborHrs > 0 -- Exclude zero-hour records if they are noise\
+    GROUP BY\
+        BasePartNum,\
+        t2.OprSeq,\
+        t3.EmployeeNum, -- Group by employee for their total time on that specific job/op instance\
+        t1.JobNum        -- Group by job as well for that specific instance\
+),\
+HistoricalOpStats AS (\
+    -- Calculate statistics for each operation sequence based on the instances found above\
+    SELECT\
+        BasePartNum,\
+        OprSeq,\
+        AVG(EmployeeJobOpTotalHrs) AS MeanHrsPerOpInstance,\
+        STDDEV_SAMP(EmployeeJobOpTotalHrs) AS StdDevHrsPerOpInstance, -- Sample standard deviation\
+        COUNT(EmployeeJobOpTotalHrs) AS InstanceCount -- Count how many instances contribute\
+    FROM HistoricalLaborInstances\
+    GROUP BY BasePartNum, OprSeq\
+)\
+-- Final select calculating bounds AND filtering by InstanceCount\
+SELECT\
+    h.BasePartNum,\
+    h.OprSeq,\
+    h.MeanHrsPerOpInstance,\
+    h.StdDevHrsPerOpInstance,\
+    h.InstanceCount,\
+    -- Calculate bounds, handling cases with zero/null std dev or few instances\
+    CASE\
+        WHEN h.StdDevHrsPerOpInstance IS NULL OR h.StdDevHrsPerOpInstance = 0 OR h.InstanceCount < 2 THEN NULL -- Std Dev undefined for < 2 samples\
+        ELSE GREATEST(0, (h.MeanHrsPerOpInstance - 1.5 * h.StdDevHrsPerOpInstance)) -- Ensure lower bound isn't negative\
+    END AS LowerBound_1_5_Sigma,\
+    CASE\
+        WHEN h.StdDevHrsPerOpInstance IS NULL OR h.StdDevHrsPerOpInstance = 0 OR h.InstanceCount < 2 THEN NULL\
+        ELSE (h.MeanHrsPerOpInstance + 1.5 * h.StdDevHrsPerOpInstance)\
+    END AS UpperBound_1_5_Sigma\
+FROM HistoricalOpStats h\
+WHERE h.InstanceCount >= 10 -- **** Added filter: Only include OprSeq with at least 10 instances ****\
+ORDER BY h.BasePartNum, h.OprSeq;}
